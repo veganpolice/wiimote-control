@@ -230,24 +230,28 @@ class TestHandleButton(unittest.TestCase):
         wd.handle_button("RIGHT", False)
         self.assertEqual(mock_quartz.CGEventPost.call_count, 0)
 
-    def test_nunchuk_z_press_sends_mouse_down(self):
+    def test_nunchuk_z_press_sets_held(self):
         wd.handle_button("NUNCHUK_Z", True)
         self.assertTrue(wd._z_held)
-        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+        # No immediate action on press (deferred: Enter on tap, precision on hold)
+        self.assertFalse(mock_quartz.CGEventCreateKeyboardEvent.called)
 
-    def test_nunchuk_z_release_sends_mouse_up(self):
+    def test_nunchuk_z_tap_sends_enter(self):
         wd.handle_button("NUNCHUK_Z", True)
-        mock_quartz.CGEventCreateMouseEvent.reset_mock()
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
         mock_quartz.CGEventPost.reset_mock()
         wd.handle_button("NUNCHUK_Z", False)
         self.assertFalse(wd._z_held)
-        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+        # Tap (no stick movement) should send Enter
+        self.assertTrue(mock_quartz.CGEventCreateKeyboardEvent.called)
+        args = mock_quartz.CGEventCreateKeyboardEvent.call_args[0]
+        self.assertEqual(args[1], wd.VK_RETURN)
 
-    def test_nunchuk_c_right_click_and_scroll_mode(self):
+    def test_nunchuk_c_sets_c_held(self):
         wd.handle_button("NUNCHUK_C", True)
-        self.assertTrue(wd._scroll_mode)
+        self.assertTrue(wd._c_held)
         wd.handle_button("NUNCHUK_C", False)
-        self.assertFalse(wd._scroll_mode)
+        self.assertFalse(wd._c_held)
 
 
 class TestModeSystem(unittest.TestCase):
@@ -385,14 +389,18 @@ class TestHandleStick(unittest.TestCase):
         # In scroll mode, should use scroll events, not mouse move
         self.assertTrue(mock_quartz.CGEventCreateScrollWheelEvent.called)
 
-    def test_drag_mode_when_z_held(self):
-        """Stick movement while Z is held sends drag events."""
+    def test_precision_mode_when_z_held(self):
+        """Stick movement while Z is held uses precision (slower) speed."""
         wd._z_held = True
+        wd._z_combo_used = False
         wd.handle_stick(1.0, 0.0)
-        self.assertTrue(wd._drag_active)
+        # Should mark Z as used (no Enter on release)
+        self.assertTrue(wd._z_combo_used)
+        # Should still move cursor (not drag)
+        self.assertFalse(wd._drag_active)
         self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
 
-    def test_no_drag_when_z_released(self):
+    def test_no_precision_when_z_released(self):
         """Stick movement without Z held sends normal move events."""
         wd._z_held = False
         wd.handle_stick(1.0, 0.0)
@@ -437,8 +445,8 @@ class TestHandleStick(unittest.TestCase):
             wd.CURSOR_CURVE = orig_curve
 
 
-class TestDragMode(unittest.TestCase):
-    """Tests for click-and-drag with Z + stick."""
+class TestZPrecisionMode(unittest.TestCase):
+    """Tests for Z = tap Enter / hold precision cursor."""
 
     def setUp(self):
         wd._wispr_active = False
@@ -449,57 +457,66 @@ class TestDragMode(unittest.TestCase):
         wd._home_combo_used = False
         wd._z_last_release = 0.0
         wd._z_held = False
+        wd._z_combo_used = False
         wd._drag_active = False
         wd._cursor_speed = 0.0
+        wd._c_held = False
+        wd._a_held = False
+        wd._smooth_x = 0.0
+        wd._smooth_y = 0.0
+        wd._sticky_scroll = False
+        wd._arrow_last_dir = None
         mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
         mock_quartz.CGEventCreateMouseEvent.reset_mock()
         mock_quartz.CGEventPost.reset_mock()
         mock_quartz.CGEventSetFlags.reset_mock()
 
-    def test_z_press_stick_release_is_drag(self):
-        """Z press → stick move → Z release = drag (not click+double-tap)."""
+    def test_z_hold_stick_release_no_enter(self):
+        """Z press → stick move → Z release = precision cursor, no Enter."""
         wd.handle_button("NUNCHUK_Z", True)
         self.assertTrue(wd._z_held)
 
-        # Move stick while Z held
+        # Move stick while Z held — marks as combo used
         wd.handle_stick(0.5, 0.0)
-        self.assertTrue(wd._drag_active)
+        self.assertTrue(wd._z_combo_used)
 
-        # Release Z — should not trigger double-tap logic
-        mock_quartz.CGEventCreateMouseEvent.reset_mock()
+        # Release Z — should NOT send Enter since stick was moved
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
         wd.handle_button("NUNCHUK_Z", False)
         self.assertFalse(wd._z_held)
-        self.assertFalse(wd._drag_active)
-        # Mouse up should have been sent
-        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+        self.assertFalse(mock_quartz.CGEventCreateKeyboardEvent.called)
 
-    def test_z_quick_tap_is_click_not_drag(self):
-        """Z press → Z release (no stick) = single click."""
+    def test_z_quick_tap_sends_enter(self):
+        """Z press → Z release (no stick) = Enter."""
         wd.handle_button("NUNCHUK_Z", True)
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
         mock_quartz.CGEventPost.reset_mock()
         wd.handle_button("NUNCHUK_Z", False)
-        # Should have sent mouse-up (click = down+up)
-        self.assertTrue(mock_quartz.CGEventPost.called)
-        self.assertFalse(wd._drag_active)
+        # Should have sent Enter
+        self.assertTrue(mock_quartz.CGEventCreateKeyboardEvent.called)
+        args = mock_quartz.CGEventCreateKeyboardEvent.call_args[0]
+        self.assertEqual(args[1], wd.VK_RETURN)
 
-    def test_drag_does_not_trigger_double_tap(self):
-        """After a drag, releasing Z should not check for double-tap."""
+    def test_z_hold_no_stick_sends_enter(self):
+        """Z press → Z release without any stick movement = still Enter."""
         wd.handle_button("NUNCHUK_Z", True)
-        wd.handle_stick(0.5, 0.0)  # Activates drag
+        # No stick movement
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
         wd.handle_button("NUNCHUK_Z", False)
+        self.assertTrue(mock_quartz.CGEventCreateKeyboardEvent.called)
 
-        # _z_last_release should not be updated after a drag
-        self.assertEqual(wd._z_last_release, 0.0)
-
-    def test_b_mode_z_bypasses_drag(self):
-        """B + Z sends paste (Cmd+V), not mouse-down."""
-        wd.handle_button("B", True)
-        mock_quartz.CGEventPost.reset_mock()
+    def test_z_dpad_marks_combo_used(self):
+        """Z held + D-pad = text selection, marks combo used (no Enter on release)."""
         wd.handle_button("NUNCHUK_Z", True)
-        # Should not enter Z-held state
-        self.assertFalse(wd._z_held)
-        # Should have sent a key combo (paste)
-        self.assertTrue(mock_quartz.CGEventPost.called)
+        self.assertFalse(wd._z_combo_used)
+        wd.handle_button("LEFT", True)
+        self.assertTrue(wd._z_combo_used)
+        # Release Z — should NOT send Enter
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
+        wd.handle_button("NUNCHUK_Z", False)
+        # Check no Enter was sent (only Shift+Left was sent earlier)
+        for call in mock_quartz.CGEventCreateKeyboardEvent.call_args_list:
+            self.assertNotEqual(call[0][1], wd.VK_RETURN)
 
 
 class TestMainIntegration(unittest.TestCase):
@@ -723,35 +740,35 @@ class TestDoubleTapZ(unittest.TestCase):
         mock_quartz.CGEventSetFlags.reset_mock()
 
     @patch("wiimote_daemon.time")
-    def test_double_tap_z_sends_double_click(self, mock_time):
-        """Two quick Z releases → double-click."""
+    def test_double_tap_a_sends_double_click(self, mock_time):
+        """Two quick A releases → double-click."""
         # First tap
         mock_time.time.return_value = 1000.0
-        wd.handle_button("NUNCHUK_Z", True)
-        wd.handle_button("NUNCHUK_Z", False)
-        first_release_posts = mock_quartz.CGEventPost.call_count
+        wd.handle_button("A", True)
+        wd.handle_button("A", False)
 
         # Second tap within window
         mock_time.time.return_value = 1000.1  # 100ms later
         mock_quartz.CGEventPost.reset_mock()
-        wd.handle_button("NUNCHUK_Z", True)
-        wd.handle_button("NUNCHUK_Z", False)
-        # Double-click sends 4 mouse events (2 down + 2 up)
+        wd.handle_button("A", True)
+        wd.handle_button("A", False)
+        # Double-click sends mouse events
         self.assertGreater(mock_quartz.CGEventPost.call_count, 0)
 
     @patch("wiimote_daemon.time")
-    def test_slow_taps_no_double_click(self, mock_time):
-        """Two slow Z releases → two single clicks, no double-click."""
+    def test_slow_taps_a_no_double_click(self, mock_time):
+        """Two slow A releases → two single clicks, no double-click."""
         mock_time.time.return_value = 1000.0
-        wd.handle_button("NUNCHUK_Z", True)
-        wd.handle_button("NUNCHUK_Z", False)
+        wd.handle_button("A", True)
+        wd.handle_button("A", False)
 
         # Second tap after window expires
         mock_time.time.return_value = 1001.0  # 1 second later
         mock_quartz.CGEventPost.reset_mock()
         mock_quartz.CGEventCreateMouseEvent.reset_mock()
-        wd.handle_button("NUNCHUK_Z", True)
-        # Press sends single click
+        wd.handle_button("A", True)
+        wd.handle_button("A", False)
+        # Should send single click, not double-click
         self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
 
 
@@ -1442,7 +1459,7 @@ class TestNotifyAndLaunchAgent(unittest.TestCase):
 
 
 class TestPrecisionCursor(unittest.TestCase):
-    """Tests for B-held precision cursor mode."""
+    """Tests for Z-held precision cursor mode."""
 
     def setUp(self):
         wd._wispr_active = False
@@ -1454,9 +1471,14 @@ class TestPrecisionCursor(unittest.TestCase):
         wd._home_combo_used = False
         wd._z_last_release = 0.0
         wd._z_held = False
+        wd._z_combo_used = False
         wd._drag_active = False
+        wd._c_held = False
+        wd._a_held = False
         wd._c_last_release = 0.0
         wd._cursor_speed = 0.0
+        wd._smooth_x = 0.0
+        wd._smooth_y = 0.0
         wd._arrow_last_dir = None
         wd._serial_source = None
         mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
@@ -1464,39 +1486,36 @@ class TestPrecisionCursor(unittest.TestCase):
         mock_quartz.CGEventPost.reset_mock()
         mock_quartz.CGEventSetFlags.reset_mock()
 
-    def test_b_held_reduces_cursor_speed(self):
-        """B held + stick = slow precision cursor."""
+    def test_z_held_reduces_cursor_speed(self):
+        """Z held + stick = slow precision cursor."""
         # Normal speed first
-        wd._b_held = False
+        wd._z_held = False
         wd.handle_stick(1.0, 0.0)
         normal_call = mock_quartz.CGEventCreateMouseEvent.call_args
 
         mock_quartz.CGEventCreateMouseEvent.reset_mock()
-        wd._cursor_speed = 0.0  # Reset
+        wd._smooth_x = 0.0
+        wd._smooth_y = 0.0
 
-        # Precision speed
-        wd._b_held = True
+        # Precision speed (Z held)
+        wd._z_held = True
+        wd._z_combo_used = False
         wd.handle_stick(1.0, 0.0)
         precision_call = mock_quartz.CGEventCreateMouseEvent.call_args
 
         # Both should have been called, precision should move less
-        # At base speed: normal moves 3.0 pixels, precision moves 0.75 pixels
         normal_pos = normal_call[0][2]  # (x, y) tuple
         precision_pos = precision_call[0][2]
-        # Precision should move cursor less from the 500.0 starting point
         normal_dx = abs(normal_pos[0] - 500.0)
         precision_dx = abs(precision_pos[0] - 500.0)
         self.assertGreater(normal_dx, precision_dx)
 
-    def test_precision_also_applies_to_drag(self):
-        """B held + Z held + stick = slow precision drag."""
-        wd._b_held = True
+    def test_z_precision_marks_combo_used(self):
+        """Z held + stick movement marks _z_combo_used so Enter is suppressed."""
         wd._z_held = True
+        wd._z_combo_used = False
         wd.handle_stick(1.0, 0.0)
-        self.assertTrue(wd._drag_active)
-        # Check it sent a drag event (kCGEventLeftMouseDragged = 6)
-        call_args = mock_quartz.CGEventCreateMouseEvent.call_args[0]
-        self.assertEqual(call_args[1], 6)  # kCGEventLeftMouseDragged
+        self.assertTrue(wd._z_combo_used)
 
 
 class TestArrowKeyMode(unittest.TestCase):

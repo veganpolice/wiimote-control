@@ -112,6 +112,11 @@ float normalize_stick(int raw) {
 }
 
 bool reporting_mode_set = false;
+bool was_connected = false;
+
+// Re-send reporting mode periodically to recover from nunchuk flakiness
+const unsigned long REPORTING_MODE_INTERVAL_MS = 5000;
+unsigned long last_reporting_mode_send = 0;
 
 void setup() {
     Serial.begin(115200);
@@ -125,11 +130,34 @@ void setup() {
 void loop() {
     wiimote.task();
 
-    // Set reporting mode once connected (must be done after pairing)
-    if (!reporting_mode_set && wiimote.isConnected()) {
-        wiimote.setReportingMode(ReportingMode::CoreButtonsAccelExt, true);
-        reporting_mode_set = true;
-        Serial.println("{\"type\":\"status\",\"msg\":\"Wiimote connected. Nunchuk+accel mode enabled.\"}");
+    bool connected = wiimote.isConnected();
+
+    // Detect reconnection — reset state so reporting mode gets re-sent
+    if (connected && !was_connected) {
+        reporting_mode_set = false;
+        prev_buttons = ButtonState::None;
+        prev_stick_x = 128;
+        prev_stick_y = 128;
+        Serial.println("{\"type\":\"status\",\"msg\":\"Wiimote connected.\"}");
+    }
+    if (!connected && was_connected) {
+        reporting_mode_set = false;
+        Serial.println("{\"type\":\"status\",\"msg\":\"Wiimote disconnected.\"}");
+    }
+    was_connected = connected;
+
+    // Set reporting mode after connection, and re-send periodically
+    // to recover from nunchuk extension resets
+    if (connected) {
+        unsigned long now_rm = millis();
+        if (!reporting_mode_set || (now_rm - last_reporting_mode_send >= REPORTING_MODE_INTERVAL_MS)) {
+            wiimote.setReportingMode(ReportingMode::CoreButtonsAccelExt, true);
+            if (!reporting_mode_set) {
+                Serial.println("{\"type\":\"status\",\"msg\":\"Nunchuk+accel mode enabled.\"}");
+            }
+            reporting_mode_set = true;
+            last_reporting_mode_send = now_rm;
+        }
     }
 
     if (wiimote.available() > 0) {

@@ -77,6 +77,7 @@ VK_BRACKET_RIGHT = 0x1E  # ] key
 VK_F = 0x03
 VK_G = 0x05
 VK_X = 0x07
+VK_T = 0x11
 VK_BACKTICK = 0x32  # ` key
 
 # Modifier name → flag mapping
@@ -96,8 +97,8 @@ BUTTON_MAP = {
     "RIGHT": ("key_combo", [], VK_RIGHT),                 # Arrow right
     "UP": ("key_combo", [], VK_UP),                       # Arrow up
     "DOWN": ("key_combo", [], VK_DOWN),                   # Arrow down
-    "PLUS": ("key_combo", [], VK_TAB),                    # Tab
-    "MINUS": ("key_combo", [], VK_DELETE),                # Delete/Backspace
+    "PLUS": ("key_combo", [], VK_RETURN),                  # Enter/Return
+    "MINUS": ("key_combo", [], VK_TAB),                   # Tab
     "HOME": ("key_combo", ["ctrl"], VK_UP),               # Mission Control
     "1": ("key_combo", [], VK_ESCAPE),                    # Escape
     "2": ("key_combo", ["cmd"], VK_SPACE),                # Cmd+Space (Siri/Spotlight)
@@ -109,10 +110,14 @@ BUTTON_MAP = {
 MODE_C_MAP = {
     "LEFT": ("key_combo", ["cmd", "shift"], VK_TAB),      # Previous app
     "RIGHT": ("key_combo", ["cmd"], VK_TAB),              # Next app
-    "UP": ("key_combo", ["cmd"], VK_BACKTICK),            # Next window in same app
-    "DOWN": ("key_combo", ["cmd"], VK_TAB),               # Switch apps (Cmd+Tab)
+    "UP": ("key_combo", ["cmd"], VK_UP),                   # Scroll to top (Cmd+Up)
+    "DOWN": ("key_combo", ["cmd"], VK_DOWN),              # Scroll to bottom (Cmd+Down)
     "PLUS": ("key_combo", ["cmd", "shift"], VK_Z),        # Redo
     "MINUS": ("key_combo", ["cmd"], VK_Z),                # Undo
+    "1": ("key_combo", ["ctrl"], VK_C),                   # Ctrl+C (interrupt)
+    "2": ("key_combo", ["cmd"], VK_W),                    # Close tab (Cmd+W)
+    "A": ("key_combo", ["cmd"], VK_T),                    # New tab (Cmd+T)
+    "HOME": ("key_combo", ["cmd"], VK_BACKTICK),          # Switch window (Cmd+`)
 }
 
 # B-held mode: hold B + press another button for alternate actions
@@ -181,7 +186,7 @@ _a_click_sent = False  # True once the deferred click has been sent
 _b_held_raw = False
 _ab_wispr_triggered = False
 AB_COMBO_WINDOW = 0.15  # Seconds to wait for B after A before committing to click
-SCROLL_SPEED = 25.0  # Scroll speed multiplier
+SCROLL_SPEED = 60.0  # Scroll speed multiplier
 
 # Mode state
 _b_held = False  # True while B button is held
@@ -195,22 +200,20 @@ DOUBLE_TAP_WINDOW = 0.3  # Seconds within which two taps = double-tap
 
 # Drag state (Z held + stick movement)
 _z_held = False  # True while Nunchuk Z is physically held
+_z_combo_used = False  # True if Z was used as modifier (stick moved while held)
 _drag_active = False  # True once stick moves while Z is held
 
-# Z-held D-pad = text selection (Shift+Arrow keys)
-Z_DPAD_MAP = {
-    "LEFT": ("key_combo", ["shift"], VK_LEFT),       # Select char left
-    "RIGHT": ("key_combo", ["shift"], VK_RIGHT),     # Select char right
-    "UP": ("key_combo", ["shift"], VK_UP),            # Select line up
-    "DOWN": ("key_combo", ["shift"], VK_DOWN),        # Select line down
-}
-
-# B + Z + D-pad = word/line-level selection
-BZ_DPAD_MAP = {
-    "LEFT": ("key_combo", ["shift", "opt"], VK_LEFT),     # Select word left
-    "RIGHT": ("key_combo", ["shift", "opt"], VK_RIGHT),   # Select word right
-    "UP": ("key_combo", ["shift", "cmd"], VK_UP),          # Select to top
-    "DOWN": ("key_combo", ["shift", "cmd"], VK_DOWN),      # Select to bottom
+# Z-held mode: Z acts as Cmd modifier + precision cursor
+# Also keeps text selection on D-pad (Shift+Arrow)
+MODE_Z_MAP = {
+    "A": ("key_combo", ["cmd"], VK_C),                    # Copy (Cmd+C)
+    "B": ("key_combo", ["cmd"], VK_X),                    # Cut (Cmd+X)
+    "PLUS": ("key_combo", ["cmd"], VK_V),                 # Paste (Cmd+V)
+    "MINUS": ("key_combo", ["cmd"], VK_Z),                # Undo (Cmd+Z)
+    "LEFT": ("key_combo", ["shift"], VK_LEFT),            # Select char left
+    "RIGHT": ("key_combo", ["shift"], VK_RIGHT),          # Select char right
+    "UP": ("key_combo", ["shift"], VK_UP),                # Select line up
+    "DOWN": ("key_combo", ["shift"], VK_DOWN),            # Select line down
 }
 
 # Double-tap C state
@@ -228,7 +231,7 @@ RUMBLE_MODE = 80       # Pulse for mode change
 RUMBLE_GESTURE = 300   # Long pulse for gesture
 
 # Precision cursor multiplier (B held = slow mode)
-PRECISION_MULTIPLIER = 4.0  # 4x speed when C is held
+PRECISION_MULTIPLIER = 6.0  # Divide speed by this when Z is held for precision
 
 # Gesture detection state
 _accel_buffer = []  # Rolling buffer of (x, y, z) readings
@@ -544,7 +547,12 @@ def send_key_combo(modifiers, keycode):
 
 
 def send_mouse_click(button="left"):
-    """Click the mouse at its current position."""
+    """Click the mouse at its current position.
+
+    Clears modifier flags so held modifiers (e.g. Wispr's Ctrl+Opt)
+    don't cause Ctrl+Click = right-click. Small delay between down/up
+    ensures macOS registers the click for window activation.
+    """
     loc = CGEventGetLocation(CGEventCreate(None))
 
     if button == "left":
@@ -553,8 +561,11 @@ def send_mouse_click(button="left"):
         down_type, up_type, btn = kCGEventRightMouseDown, kCGEventRightMouseUp, kCGMouseButtonRight
 
     e = CGEventCreateMouseEvent(None, down_type, loc, btn)
+    CGEventSetFlags(e, 0)
     CGEventPost(kCGHIDEventTap, e)
+    time.sleep(0.02)  # Brief pause so macOS registers the click
     e = CGEventCreateMouseEvent(None, up_type, loc, btn)
+    CGEventSetFlags(e, 0)
     CGEventPost(kCGHIDEventTap, e)
 
 
@@ -707,25 +718,31 @@ def handle_button(button_id, pressed):
     """
     global _wispr_active, _scroll_mode, _b_held, _b_combo_used
     global _home_held, _home_combo_used, _z_last_release
-    global _z_held, _drag_active, _c_last_release, _c_held
+    global _z_held, _z_combo_used, _drag_active, _c_last_release, _c_held
     global _a_held, _a_press_time, _a_click_sent, _b_held_raw, _ab_wispr_triggered
 
     # --- A = click/drag/double-tap ---
+    # Mouse-down is deferred until stick moves (drag) to avoid
+    # accidental micro-drags that prevent window activation.
     if button_id == "A":
         if pressed:
-            _z_held = True
+            _a_held = True
             _drag_active = False
-            send_mouse_down("left")
+            # Don't send mouse-down yet — wait for stick movement (drag)
+            # or release (tap/click)
         else:
-            _z_held = False
-            send_mouse_up("left")
-            if not _drag_active:
-                rumble(RUMBLE_CLICK)
+            _a_held = False
+            if _drag_active:
+                # Was dragging — release
+                send_mouse_up("left")
+            else:
+                # Clean tap — send full click at current position
                 now = time.time()
                 if now - _z_last_release < DOUBLE_TAP_WINDOW:
                     send_double_click()
                     _z_last_release = 0.0
                 else:
+                    send_mouse_click("left")
                     _z_last_release = now
             _drag_active = False
         return
@@ -737,18 +754,12 @@ def handle_button(button_id, pressed):
 
     # --- Home = Mission Control (via BUTTON_MAP, no mode system) ---
 
-    # --- Z-held D-pad = text selection (highest priority for D-pad when Z held) ---
-    if _z_held and button_id in Z_DPAD_MAP:
-        if _b_held:
-            # B + Z + D-pad = word/line selection
-            action = BZ_DPAD_MAP.get(button_id)
-            if action:
-                _b_combo_used = True
-                execute_action(action, pressed)
-        else:
-            action = Z_DPAD_MAP.get(button_id)
-            if action:
-                execute_action(action, pressed)
+    # --- Z-held = Cmd modifier mode (copy/paste/undo/cut + text selection) ---
+    if _z_held and button_id in MODE_Z_MAP:
+        _z_combo_used = True
+        action = MODE_Z_MAP.get(button_id)
+        if action:
+            execute_action(action, pressed)
         return
 
     # --- Route through active modifier maps (B takes priority) ---
@@ -759,22 +770,22 @@ def handle_button(button_id, pressed):
             execute_action(action, pressed)
             return
 
-    if _home_held:
-        action = MODE_HOME_MAP.get(button_id)
-        if action is not None:
-            _home_combo_used = True
-            execute_action(action, pressed)
-            return
-
     # --- Nunchuk C: modifier button ---
     if button_id == "NUNCHUK_C":
         _c_held = pressed
         return
 
-    # --- Nunchuk Z: Enter ---
+    # --- Nunchuk Z: tap=Enter, hold=precision cursor ---
     if button_id == "NUNCHUK_Z":
         if pressed:
-            send_key_combo([], VK_RETURN)
+            _z_held = True
+            _z_combo_used = False
+        else:
+            _z_held = False
+            if not _z_combo_used:
+                # Clean tap — send Enter
+                send_key_combo([], VK_RETURN)
+            _z_combo_used = False
         return
 
     # --- C-held mode routing ---
@@ -794,11 +805,11 @@ def handle_stick(x, y):
     """Handle nunchuk analog stick input.
 
     In normal mode: move cursor. When Nunchuk C is held: scroll instead.
-    When Nunchuk Z is held: drag (mouse-dragged events).
+    When Nunchuk Z is held: precision cursor (slower movement).
     x/y range: -1.0 to 1.0 (0.0 = centered, already dead-zone filtered by ESP32).
     """
     global _cursor_speed, _drag_active, _arrow_last_dir, _home_combo_used
-    global _smooth_x, _smooth_y
+    global _smooth_x, _smooth_y, _z_combo_used
 
     # Apply dead zone
     if abs(x) < CURSOR_DEAD_ZONE:
@@ -877,11 +888,19 @@ def handle_stick(x, y):
 
     speed = CURSOR_MAX_SPEED
 
+    # Z held = precision mode (slower cursor)
+    if _z_held:
+        speed = speed / PRECISION_MULTIPLIER
+        if cx != 0.0 or cy != 0.0:
+            _z_combo_used = True
+
     if _sticky_scroll:
         send_scroll(cx * SCROLL_SPEED, -cy * SCROLL_SPEED)
-    elif _z_held:
-        # Z held = drag mode
-        _drag_active = True
+    elif _a_held:
+        # A held + stick = drag mode
+        if not _drag_active:
+            send_mouse_down("left")  # Start drag on first stick movement
+            _drag_active = True
         move_cursor_dragged(cx * speed, -cy * speed)
     else:
         move_cursor(cx * speed, -cy * speed)
