@@ -1520,5 +1520,265 @@ class TestSendRumble(unittest.TestCase):
         self.assertEqual(parsed["rumble"], 200)
 
 
+# ---------- Phase 2: Regression / Snapshot Tests ----------
+
+
+class TestButtonMapSnapshots(unittest.TestCase):
+    """Freeze current button mappings so accidental changes are caught."""
+
+    def test_button_map_exact(self):
+        expected = {
+            "LEFT": ("key_combo", [], wd.VK_LEFT),
+            "RIGHT": ("key_combo", [], wd.VK_RIGHT),
+            "UP": ("key_combo", [], wd.VK_UP),
+            "DOWN": ("key_combo", [], wd.VK_DOWN),
+            "PLUS": ("key_combo", [], wd.VK_RETURN),
+            "MINUS": ("key_combo", [], wd.VK_TAB),
+            "HOME": ("key_combo", ["ctrl"], wd.VK_UP),
+            "1": ("key_combo", [], wd.VK_ESCAPE),
+            "2": ("key_combo", ["cmd"], wd.VK_SPACE),
+        }
+        self.assertEqual(len(wd.BUTTON_MAP), len(expected))
+        for key, val in expected.items():
+            self.assertIn(key, wd.BUTTON_MAP, f"Missing key: {key}")
+            self.assertEqual(wd.BUTTON_MAP[key], val, f"Mismatch for {key}")
+
+    def test_mode_c_map_exact(self):
+        expected = {
+            "LEFT": ("key_combo", ["cmd", "shift"], wd.VK_TAB),
+            "RIGHT": ("key_combo", ["cmd"], wd.VK_TAB),
+            "UP": ("key_combo", ["cmd"], wd.VK_UP),
+            "DOWN": ("key_combo", ["cmd"], wd.VK_DOWN),
+            "PLUS": ("key_combo", ["cmd", "shift"], wd.VK_Z),
+            "MINUS": ("key_combo", ["cmd"], wd.VK_Z),
+            "1": ("key_combo", ["ctrl"], wd.VK_C),
+            "2": ("key_combo", ["cmd"], wd.VK_W),
+            "A": ("key_combo", ["cmd"], wd.VK_T),
+            "HOME": ("key_combo", ["cmd"], wd.VK_BACKTICK),
+        }
+        self.assertEqual(len(wd.MODE_C_MAP), len(expected))
+        for key, val in expected.items():
+            self.assertIn(key, wd.MODE_C_MAP, f"Missing key: {key}")
+            self.assertEqual(wd.MODE_C_MAP[key], val, f"Mismatch for {key}")
+
+    def test_mode_z_map_exact(self):
+        expected = {
+            "A": ("key_combo", ["cmd"], wd.VK_C),
+            "B": ("key_combo", ["cmd"], wd.VK_X),
+            "PLUS": ("key_combo", ["cmd"], wd.VK_V),
+            "MINUS": ("key_combo", ["cmd"], wd.VK_Z),
+            "LEFT": ("key_combo", ["shift"], wd.VK_LEFT),
+            "RIGHT": ("key_combo", ["shift"], wd.VK_RIGHT),
+            "UP": ("key_combo", ["shift"], wd.VK_UP),
+            "DOWN": ("key_combo", ["shift"], wd.VK_DOWN),
+        }
+        self.assertEqual(len(wd.MODE_Z_MAP), len(expected))
+        for key, val in expected.items():
+            self.assertIn(key, wd.MODE_Z_MAP, f"Missing key: {key}")
+            self.assertEqual(wd.MODE_Z_MAP[key], val, f"Mismatch for {key}")
+
+
+class TestSpecialHandlerRegression(unittest.TestCase):
+    """Lock in exact behavior of A, B, C, Z special handlers."""
+
+    def setUp(self):
+        wd._wispr_active = False
+        wd._a_held = False
+        wd._c_held = False
+        wd._z_held = False
+        wd._z_combo_used = False
+        wd._drag_active = False
+        wd._z_last_release = 0.0
+        wd._smooth_x = 0.0
+        wd._smooth_y = 0.0
+        wd._scroll_mode = False
+        wd._sticky_scroll = False
+        wd._b_held = False
+        wd._b_combo_used = False
+        wd._home_held = False
+        wd._home_combo_used = False
+        wd._cursor_speed = 0.0
+        wd._arrow_last_dir = None
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
+        mock_quartz.CGEventCreateMouseEvent.reset_mock()
+        mock_quartz.CGEventCreateScrollWheelEvent.reset_mock()
+        mock_quartz.CGEventPost.reset_mock()
+        mock_quartz.CGEventSetFlags.reset_mock()
+
+    # --- A button: click/drag/double-tap ---
+
+    def test_a_press_defers_no_events(self):
+        wd.handle_button("A", True)
+        self.assertTrue(wd._a_held)
+        self.assertFalse(wd._drag_active)
+        mock_quartz.CGEventPost.assert_not_called()
+
+    def test_a_release_sends_click(self):
+        wd.handle_button("A", True)
+        mock_quartz.CGEventPost.reset_mock()
+        wd.handle_button("A", False)
+        self.assertFalse(wd._a_held)
+        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+
+    def test_a_drag_flow(self):
+        """A press + stick movement = drag, A release = mouse up."""
+        wd.handle_button("A", True)
+        wd.handle_stick(0.8, 0.0)
+        self.assertTrue(wd._drag_active)
+        mock_quartz.CGEventPost.reset_mock()
+        wd.handle_button("A", False)
+        # Should send mouse up (end drag), not a click
+        self.assertFalse(wd._drag_active)
+        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+
+    @patch("wiimote_daemon.time")
+    def test_a_double_tap(self, mock_time):
+        """Two quick A taps = double click."""
+        mock_time.time.return_value = 1000.0
+        wd.handle_button("A", True)
+        wd.handle_button("A", False)
+        mock_time.time.return_value = 1000.1
+        mock_quartz.CGEventPost.reset_mock()
+        wd.handle_button("A", True)
+        wd.handle_button("A", False)
+        # Double-click fires extra events
+        self.assertGreater(mock_quartz.CGEventPost.call_count, 2)
+
+    # --- B button: Wispr Flow toggle ---
+
+    def test_b_press_activates_wispr(self):
+        wd.handle_button("B", True)
+        self.assertTrue(wd._wispr_active)
+
+    def test_b_release_deactivates_wispr(self):
+        wd.handle_button("B", True)
+        wd.handle_button("B", False)
+        self.assertFalse(wd._wispr_active)
+
+    def test_b_idempotent(self):
+        """Second B press while Wispr active is no-op."""
+        wd.handle_button("B", True)
+        count = mock_quartz.CGEventPost.call_count
+        wd.handle_button("B", True)
+        self.assertEqual(mock_quartz.CGEventPost.call_count, count)
+
+    # --- C button: modifier + scroll ---
+
+    def test_c_sets_held(self):
+        wd.handle_button("NUNCHUK_C", True)
+        self.assertTrue(wd._c_held)
+        wd.handle_button("NUNCHUK_C", False)
+        self.assertFalse(wd._c_held)
+
+    def test_c_held_routes_to_mode_c_map(self):
+        """C held + RIGHT = Cmd+Tab (from MODE_C_MAP)."""
+        wd._c_held = True
+        wd.handle_button("RIGHT", True)
+        self.assertTrue(mock_quartz.CGEventPost.called)
+
+    def test_c_held_scroll(self):
+        """C held + stick = scroll events."""
+        wd._c_held = True
+        wd.handle_stick(0.0, 0.8)
+        self.assertTrue(mock_quartz.CGEventCreateScrollWheelEvent.called)
+
+    # --- Z button: tap=Enter, hold=precision, hold+button=MODE_Z_MAP ---
+
+    def test_z_tap_sends_enter(self):
+        wd.handle_button("NUNCHUK_Z", True)
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
+        wd.handle_button("NUNCHUK_Z", False)
+        args = mock_quartz.CGEventCreateKeyboardEvent.call_args[0]
+        self.assertEqual(args[1], wd.VK_RETURN)
+
+    def test_z_hold_stick_suppresses_enter(self):
+        """Z held + stick movement = no Enter on release."""
+        wd.handle_button("NUNCHUK_Z", True)
+        wd.handle_stick(0.8, 0.0)
+        self.assertTrue(wd._z_combo_used)
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
+        wd.handle_button("NUNCHUK_Z", False)
+        # No Enter sent because stick was moved
+        for call in mock_quartz.CGEventCreateKeyboardEvent.call_args_list:
+            self.assertNotEqual(call[0][1], wd.VK_RETURN)
+
+    def test_z_held_plus_sends_paste(self):
+        """Z held + PLUS = Paste (Cmd+V) from MODE_Z_MAP."""
+        wd.handle_button("NUNCHUK_Z", True)
+        mock_quartz.CGEventPost.reset_mock()
+        wd.handle_button("PLUS", True)
+        self.assertTrue(wd._z_combo_used)
+        self.assertTrue(mock_quartz.CGEventPost.called)
+
+    def test_z_held_left_sends_shift_left(self):
+        """Z held + LEFT = Shift+Left (text selection) from MODE_Z_MAP."""
+        wd.handle_button("NUNCHUK_Z", True)
+        mock_quartz.CGEventPost.reset_mock()
+        wd.handle_button("LEFT", True)
+        self.assertTrue(wd._z_combo_used)
+        self.assertTrue(mock_quartz.CGEventPost.called)
+
+    def test_z_held_a_still_clicks(self):
+        """Z held + A = A's click handler (A is intercepted before Z-mode routing)."""
+        wd.handle_button("NUNCHUK_Z", True)
+        wd.handle_button("A", True)
+        # A's special handler runs first: sets _a_held, not Z combo
+        self.assertTrue(wd._a_held)
+
+
+class TestHandleStickRegression(unittest.TestCase):
+    """Lock in handle_stick control flow for each mode."""
+
+    def setUp(self):
+        wd._smooth_x = 0.0
+        wd._smooth_y = 0.0
+        wd._c_held = False
+        wd._a_held = False
+        wd._z_held = False
+        wd._z_combo_used = False
+        wd._drag_active = False
+        wd._sticky_scroll = False
+        wd._home_held = False
+        wd._home_combo_used = False
+        wd._arrow_last_dir = None
+        wd._cursor_speed = 0.0
+        mock_quartz.CGEventCreateMouseEvent.reset_mock()
+        mock_quartz.CGEventCreateScrollWheelEvent.reset_mock()
+        mock_quartz.CGEventCreateKeyboardEvent.reset_mock()
+        mock_quartz.CGEventPost.reset_mock()
+
+    def test_normal_moves_cursor(self):
+        """Stick deflection with no modifiers moves cursor."""
+        wd.handle_stick(0.8, 0.0)
+        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+
+    def test_c_held_scrolls(self):
+        """C held + stick = scroll, no cursor movement."""
+        wd._c_held = True
+        wd.handle_stick(0.0, 0.8)
+        self.assertTrue(mock_quartz.CGEventCreateScrollWheelEvent.called)
+        mock_quartz.CGEventCreateMouseEvent.assert_not_called()
+
+    def test_z_held_precision(self):
+        """Z held = slower cursor, marks combo used."""
+        wd._z_held = True
+        wd.handle_stick(0.8, 0.0)
+        self.assertTrue(wd._z_combo_used)
+        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+
+    def test_a_held_starts_drag(self):
+        """A held + stick = mouse drag."""
+        wd._a_held = True
+        wd.handle_stick(0.8, 0.0)
+        self.assertTrue(wd._drag_active)
+        self.assertTrue(mock_quartz.CGEventCreateMouseEvent.called)
+
+    def test_dead_zone_center(self):
+        """Stick at center sends no events."""
+        wd.handle_stick(0.0, 0.0)
+        mock_quartz.CGEventCreateMouseEvent.assert_not_called()
+        mock_quartz.CGEventCreateScrollWheelEvent.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
