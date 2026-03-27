@@ -1039,7 +1039,7 @@ def write_help():
             if _z_held:
                 lines.append("")
                 lines.append("=== Z-HELD (text selection) ===")
-                for btn, action in sorted(Z_DPAD_MAP.items()):
+                for btn, action in sorted(MODE_Z_MAP.items()):
                     lines.append(f"  Z + {btn:12s} → {_action_desc(action)}")
 
         with open(HELP_FILE, "w") as f:
