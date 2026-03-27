@@ -179,13 +179,8 @@ _sticky_scroll = False  # True when sticky scroll is toggled on (Home + C)
 # Precision mode (C held)
 _c_held = False  # True while Nunchuk C is physically held
 
-# A+B combo for Wispr Flow
+# A button state
 _a_held = False
-_a_press_time = 0.0  # When A was pressed (for deferred click)
-_a_click_sent = False  # True once the deferred click has been sent
-_b_held_raw = False
-_ab_wispr_triggered = False
-AB_COMBO_WINDOW = 0.15  # Seconds to wait for B after A before committing to click
 SCROLL_SPEED = 60.0  # Scroll speed multiplier
 
 # Mode state
@@ -719,7 +714,7 @@ def handle_button(button_id, pressed):
     global _wispr_active, _scroll_mode, _b_held, _b_combo_used
     global _home_held, _home_combo_used, _z_last_release
     global _z_held, _z_combo_used, _drag_active, _c_last_release, _c_held
-    global _a_held, _a_press_time, _a_click_sent, _b_held_raw, _ab_wispr_triggered
+    global _a_held
 
     # --- A = click/drag/double-tap ---
     # Mouse-down is deferred until stick moves (drag) to avoid
@@ -1086,7 +1081,7 @@ def write_status():
     status = {
         "mode": mode,
         "wispr": _wispr_active,
-        "scroll": _scroll_mode or _sticky_scroll,
+        "scroll": _c_held or _sticky_scroll,
         "sticky_scroll": _sticky_scroll,
         "z_held": _z_held,
         "drag": _drag_active,
@@ -1200,7 +1195,7 @@ def _get_config_mtime():
 
 def run_event_loop(source, rumble_on_wispr, rumble_duration, record_file=None):
     """Process events from a source. Returns True if should reconnect, False to exit."""
-    global _serial_source, _battery_level, _a_click_sent
+    global _serial_source, _battery_level
     _serial_source = source
     prev_wispr = False
     event_count = 0
